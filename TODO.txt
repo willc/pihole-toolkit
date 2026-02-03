@@ -1,0 +1,24 @@
+Pi-hole Toolkit - Working
+
+All core features implemented and tested.
+
+Commands available:
+  stats      - Show Pi-hole statistics (queries, blocked, cache hits, etc.)
+  status     - Show blocking status and version info
+  top -n N   - Top permitted and blocked domains
+  clients -n N - Top clients by query count
+  json       - Raw JSON statistics output
+  enable     - Enable blocking (requires password)
+  disable -d SECONDS - Disable blocking, optionally for N seconds
+  configure  - Interactive setup (host, password)
+  config     - Show current configuration
+
+Configuration:
+  File: ~/.config/pihole-cli/config.json
+  Env vars: PIHOLE_HOST, PIHOLE_PASSWORD
+  CLI flags: --host, --password
+
+Future ideas:
+- Query log analysis
+- Blocklist management
+- Add/remove domains from whitelist/blacklist
