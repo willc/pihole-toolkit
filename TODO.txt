@@ -19,6 +19,8 @@ Configuration:
   CLI flags: --host, --password
 
 Future ideas:
+- Run pihole updates
+- Colorize output to look nicer
 - Query log analysis
 - Blocklist management
 - Add/remove domains from whitelist/blacklist
