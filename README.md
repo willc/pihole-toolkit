@@ -1,6 +1,6 @@
 # pihole-toolkit
 
-A command-line interface for managing Pi-hole v6 servers.
+A command-line interface for managing Pi-hole v6 servers from your local computer.
 
 ## Features
 
