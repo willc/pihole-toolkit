@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -15,6 +16,58 @@ CONFIG_DIR = Path.home() / ".config" / "pihole-cli"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 DEFAULT_HOST = "10.0.0.100"
+
+
+# ── Colors ──────────────────────────────────────────────────────────
+
+class Color:
+    """ANSI color codes, disabled when output is not a terminal."""
+
+    _enabled = sys.stdout.isatty()
+
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
+    CYAN = "\033[36m"
+    WHITE = "\033[37m"
+
+    @classmethod
+    def c(cls, code: str, text: str) -> str:
+        if not cls._enabled:
+            return text
+        return f"{code}{text}{cls.RESET}"
+
+    @classmethod
+    def bold(cls, text: str) -> str:
+        return cls.c(cls.BOLD, text)
+
+    @classmethod
+    def dim(cls, text: str) -> str:
+        return cls.c(cls.DIM, text)
+
+    @classmethod
+    def red(cls, text: str) -> str:
+        return cls.c(cls.RED, text)
+
+    @classmethod
+    def green(cls, text: str) -> str:
+        return cls.c(cls.GREEN, text)
+
+    @classmethod
+    def yellow(cls, text: str) -> str:
+        return cls.c(cls.YELLOW, text)
+
+    @classmethod
+    def blue(cls, text: str) -> str:
+        return cls.c(cls.BLUE, text)
+
+    @classmethod
+    def cyan(cls, text: str) -> str:
+        return cls.c(cls.CYAN, text)
 
 
 def load_config() -> dict:
@@ -179,6 +232,38 @@ class PiholeClient:
         """Get top clients."""
         return self._request(f"stats/top_clients?count={count}")
 
+    def update_gravity(self) -> str:
+        """Trigger a gravity (blocklist) update. Returns streaming text output."""
+        url = f"{self.base_url}/action/gravity"
+
+        if self.password:
+            if not self.sid:
+                self._authenticate()
+            if self.sid:
+                url = f"{url}?sid={self.sid}"
+
+        try:
+            response = self.session.post(url, timeout=120, stream=True)
+
+            # Handle 401 by re-authenticating
+            if response.status_code == 401 and self.password:
+                self.sid = None
+                if self._authenticate(force=True):
+                    url = f"{self.base_url}/action/gravity?sid={self.sid}"
+                    response = self.session.post(url, timeout=120, stream=True)
+
+            response.raise_for_status()
+            return response.text
+        except requests.exceptions.ConnectionError:
+            print(f"Error: Could not connect to Pi-hole at {self.base_url}")
+            sys.exit(1)
+        except requests.exceptions.Timeout:
+            print("Error: Gravity update timed out")
+            sys.exit(1)
+        except requests.exceptions.HTTPError as e:
+            print(f"Error: HTTP {e.response.status_code}")
+            sys.exit(1)
+
     def set_blocking(self, enabled: bool, duration: int | None = None) -> dict:
         """Enable or disable Pi-hole blocking.
 
@@ -217,16 +302,16 @@ def cmd_stats(client: PiholeClient, args):
     blocked = queries.get("blocked", 0)
     percent = (blocked / total * 100) if total > 0 else 0
 
-    print("\n=== Pi-hole Statistics ===\n")
-    print(f"Total Queries:       {format_number(total)}")
-    print(f"Queries Blocked:     {format_number(blocked)}")
-    print(f"Percent Blocked:     {percent:.1f}%")
-    print(f"Unique Domains:      {format_number(queries.get('unique_domains', 'N/A'))}")
-    print(f"Queries Forwarded:   {format_number(queries.get('forwarded', 'N/A'))}")
-    print(f"Queries Cached:      {format_number(queries.get('cached', 'N/A'))}")
-    print(f"Clients (active):    {format_number(summary.get('clients', {}).get('active', 'N/A'))}")
-    print(f"Clients (total):     {format_number(summary.get('clients', {}).get('total', 'N/A'))}")
-    print(f"Gravity size:        {format_number(summary.get('gravity', {}).get('domains_being_blocked', 'N/A'))}")
+    print(f"\n{Color.bold('Pi-hole Statistics')}\n")
+    print(f"  {Color.dim('Total Queries')}       {Color.bold(format_number(total))}")
+    print(f"  {Color.dim('Queries Blocked')}     {Color.red(format_number(blocked))}")
+    print(f"  {Color.dim('Percent Blocked')}     {Color.yellow(f'{percent:.1f}%')}")
+    print(f"  {Color.dim('Unique Domains')}      {format_number(queries.get('unique_domains', 'N/A'))}")
+    print(f"  {Color.dim('Queries Forwarded')}   {format_number(queries.get('forwarded', 'N/A'))}")
+    print(f"  {Color.dim('Queries Cached')}      {Color.green(format_number(queries.get('cached', 'N/A')))}")
+    print(f"  {Color.dim('Clients (active)')}    {format_number(summary.get('clients', {}).get('active', 'N/A'))}")
+    print(f"  {Color.dim('Clients (total)')}     {format_number(summary.get('clients', {}).get('total', 'N/A'))}")
+    print(f"  {Color.dim('Gravity size')}        {format_number(summary.get('gravity', {}).get('domains_being_blocked', 'N/A'))}")
     print()
 
 
@@ -236,7 +321,8 @@ def cmd_status(client: PiholeClient, args):
     version = client.get_version()
 
     blocking_status = status.get("blocking")
-    blocking = "ENABLED" if blocking_status == "enabled" or blocking_status is True else "DISABLED"
+    is_enabled = blocking_status == "enabled" or blocking_status is True
+    blocking_text = Color.green("ENABLED") if is_enabled else Color.red("DISABLED")
     timer = status.get("timer")
 
     # Extract version info from nested structure
@@ -244,13 +330,27 @@ def cmd_status(client: PiholeClient, args):
     ftl_info = version_info.get("ftl", {}).get("local", {})
     core_info = version_info.get("core", {}).get("local", {})
 
-    print("\n=== Pi-hole Status ===\n")
-    print(f"Blocking:    {blocking}")
+    # Check for updates
+    ftl_remote = version_info.get("ftl", {}).get("remote", {})
+    core_remote = version_info.get("core", {}).get("remote", {})
+    ftl_update = ftl_info.get("hash") != ftl_remote.get("hash")
+    core_update = core_info.get("hash") != core_remote.get("hash")
+
+    print(f"\n{Color.bold('Pi-hole Status')}\n")
+    print(f"  {Color.dim('Blocking')}      {blocking_text}")
     if timer:
-        print(f"Timer:       {timer}s remaining")
-    print(f"FTL Version: {ftl_info.get('version', 'N/A')}")
-    print(f"Core:        {core_info.get('version', 'N/A')}")
-    print(f"Branch:      {ftl_info.get('branch', 'N/A')}")
+        print(f"  {Color.dim('Timer')}         {Color.yellow(f'{timer}s remaining')}")
+    print(f"  {Color.dim('FTL Version')}   {ftl_info.get('version', 'N/A')}")
+    print(f"  {Color.dim('Core')}          {core_info.get('version', 'N/A')}")
+    print(f"  {Color.dim('Branch')}        {ftl_info.get('branch', 'N/A')}")
+
+    if ftl_update or core_update:
+        updates = []
+        if ftl_update:
+            updates.append(f"FTL {ftl_remote.get('version')}")
+        if core_update:
+            updates.append(f"Core {core_remote.get('version')}")
+        print(f"\n  {Color.yellow('Updates available: ' + ', '.join(updates))}")
     print()
 
 
@@ -263,13 +363,17 @@ def cmd_top(client: PiholeClient, args):
     permitted = client.get_top_domains(args.count, blocked=False)
     blocked = client.get_top_domains(args.count, blocked=True)
 
-    print(f"\n=== Top {args.count} Permitted Domains ===\n")
+    print(f"\n{Color.bold(f'Top {args.count} Permitted Domains')}\n")
     for item in permitted.get("domains", [])[:args.count]:
-        print(f"  {item.get('count', 0):>8}  {item.get('domain', 'unknown')}")
+        count = format_number(item.get('count', 0))
+        domain = item.get('domain', 'unknown')
+        print(f"  {Color.green(f'{count:>8}')}  {domain}")
 
-    print(f"\n=== Top {args.count} Blocked Domains ===\n")
+    print(f"\n{Color.bold(f'Top {args.count} Blocked Domains')}\n")
     for item in blocked.get("domains", [])[:args.count]:
-        print(f"  {item.get('count', 0):>8}  {item.get('domain', 'unknown')}")
+        count = format_number(item.get('count', 0))
+        domain = item.get('domain', 'unknown')
+        print(f"  {Color.red(f'{count:>8}')}  {domain}")
     print()
 
 
@@ -281,11 +385,11 @@ def cmd_clients(client: PiholeClient, args):
 
     data = client.get_top_clients(args.count)
 
-    print(f"\n=== Top {args.count} Clients ===\n")
+    print(f"\n{Color.bold(f'Top {args.count} Clients')}\n")
     for item in data.get("clients", [])[:args.count]:
         name = item.get("name") or item.get("ip", "unknown")
-        count = item.get("count", 0)
-        print(f"  {count:>8}  {name}")
+        count = format_number(item.get("count", 0))
+        print(f"  {Color.cyan(f'{count:>8}')}  {name}")
     print()
 
 
@@ -305,7 +409,7 @@ def cmd_enable(client: PiholeClient, args):
     blocking = result.get("blocking")
 
     if blocking:
-        print("\nPi-hole blocking ENABLED")
+        print(f"\n{Color.green('Pi-hole blocking ENABLED')}")
     else:
         print(f"\nUnexpected response: {result}")
     print()
@@ -325,13 +429,78 @@ def cmd_disable(client: PiholeClient, args):
         if duration:
             minutes, seconds = divmod(duration, 60)
             if minutes > 0:
-                print(f"\nPi-hole blocking DISABLED for {minutes}m {seconds}s")
+                print(f"\n{Color.red(f'Pi-hole blocking DISABLED for {minutes}m {seconds}s')}")
             else:
-                print(f"\nPi-hole blocking DISABLED for {seconds}s")
+                print(f"\n{Color.red(f'Pi-hole blocking DISABLED for {seconds}s')}")
         else:
-            print("\nPi-hole blocking DISABLED indefinitely")
+            print(f"\n{Color.red('Pi-hole blocking DISABLED indefinitely')}")
     else:
         print(f"\nUnexpected response: {result}")
+    print()
+
+
+def cmd_update(client: PiholeClient, args):
+    """Check for updates and optionally update gravity."""
+    if not client.password:
+        print("Error: Password required. Use --token option or run 'configure'.")
+        sys.exit(1)
+
+    version = client.get_version()
+    version_info = version.get("version", {})
+
+    print(f"\n{Color.bold('Pi-hole Version Check')}\n")
+
+    components = [
+        ("FTL", "ftl"),
+        ("Core", "core"),
+        ("Web", "web"),
+    ]
+
+    has_update = False
+    for label, key in components:
+        local = version_info.get(key, {}).get("local", {})
+        remote = version_info.get(key, {}).get("remote", {})
+        local_ver = local.get("version", "N/A")
+        remote_ver = remote.get("version", "N/A")
+        needs_update = local.get("hash") != remote.get("hash")
+
+        if needs_update:
+            has_update = True
+            print(f"  {Color.dim(label + ':'):14} {local_ver} -> {Color.yellow(remote_ver)}")
+        else:
+            print(f"  {Color.dim(label + ':'):14} {Color.green(local_ver)} {Color.dim('(up to date)')}")
+
+    if has_update:
+        print(f"\n  {Color.yellow('Updates available.')} Run 'pihole -up' on the Pi-hole to update.")
+
+    # Gravity update
+    if getattr(args, "gravity", False):
+        print(f"\n{Color.bold('Updating Gravity')}\n")
+        output = client.update_gravity()
+        # Clean ANSI escape codes from Pi-hole output and print
+        clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]|\[K', '', output)
+        for line in clean.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # Match checkmark variants (UTF-8 ✓ or mangled bytes)
+            if re.match(r'\[(\u2713|â.?)\]', line):
+                text = re.sub(r'^\[.\]\.?\s*', '', line)
+                print(f"  {Color.green('✓')} {text}")
+            # Match X/cross variants
+            elif re.match(r'\[(\u2717|â.?)\]', line):
+                text = re.sub(r'^\[.\]\.?\s*', '', line)
+                print(f"  {Color.red('✗')} {text}")
+            elif line.startswith('[i]'):
+                print(f"  {Color.dim('·')} {line[4:]}")
+            elif line.startswith('Sample of'):
+                print(f"    {Color.dim(line)}")
+            elif line.startswith('- '):
+                print(f"    {Color.dim(line)}")
+            else:
+                print(f"  {line}")
+        print(f"\n  {Color.green('Gravity update complete.')}")
+
     print()
 
 
@@ -471,6 +640,17 @@ Priority: command line > environment variable > config file > default
         help="Disable for specified seconds (default: indefinite)",
     )
     disable_parser.set_defaults(func=cmd_disable)
+
+    # update command
+    update_parser = subparsers.add_parser(
+        "update", help="Check for Pi-hole updates and update gravity"
+    )
+    update_parser.add_argument(
+        "-g", "--gravity",
+        action="store_true",
+        help="Also update gravity (blocklists)",
+    )
+    update_parser.set_defaults(func=cmd_update)
 
     # configure command
     configure_parser = subparsers.add_parser(
